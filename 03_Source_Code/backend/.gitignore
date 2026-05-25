@@ -1,0 +1,19 @@
+node_modules
+/node_modules/
+# Keep environment variables out of version control
+.env
+# Build output
+dist/
+
+# Artefak salah jalan: `tsc` tanpa outDir menulis .js di samping .ts
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts
+src/**/*.d.ts.map
+# Prisma generated files
+/src/generated/prisma
+# AI assistant tools — jangan di-commit
+.claude/
+CLAUDE.md
+# Editor settings lokal
+.vscode/*

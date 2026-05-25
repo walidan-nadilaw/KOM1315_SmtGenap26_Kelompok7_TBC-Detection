@@ -1,0 +1,367 @@
+// =============================================================================
+// Sistem Deteksi TBC — Skema Prisma (PostgreSQL)
+// =============================================================================
+// Tujuan: pemodelan rekam medis + citra mikroskopis + jejak audit.
+// Konvensi: UUID untuk semua PK publik; waktu dalam UTC (DateTime Prisma).
+// Catatan kepatuhan: penghapusan fisik pasien/kasus biasanya dilarang — gunakan
+// arsitektur soft-delete + retention; batasi CASCADE hanya pada agregat turunan.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// -----------------------------------------------------------------------------
+// ENUM — Domain klinis & workflow (disimpan sebagai tipe native PostgreSQL ENUM)
+// -----------------------------------------------------------------------------
+
+/// Peran pengguna. ADMIN_AI: administrasi / operasional modul AI sesuai kebutuhan proyek.
+enum Role {
+  OPERATOR_LAB
+  DOKTER_PATOLOGI
+  ADMIN_AI
+}
+
+enum CaseStatus {
+  PENDING_UPLOAD
+  AI_PROCESSING
+  PENDING_VALIDATION
+  RESOLVED
+}
+
+enum FindingType {
+  NECROSIS
+  DATIA_LANGHANS
+  EPITHELIOID
+  GRANULOMA
+}
+
+enum SeverityLevel {
+  SANGAT_RENDAH
+  RENDAH
+  SEDANG
+  TINGGI
+  SANGAT_TINGGI
+}
+
+enum ProcessingStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum QcStatus {
+  PENDING
+  PASSED
+  FAILED
+}
+
+enum QcFailureReason {
+  BLUR
+  DARK
+  BRIGHT
+  NOISE
+}
+
+/// Pembesaran objektif mikroskop (selaraskan dengan perangkat lab).
+enum Magnification {
+  X10
+  X40
+  X100
+}
+
+/// Pewarnaan sediaan; ZN = Ziehl–Neelsen (relevan TBC); HE = hematoksilin-eosin.
+enum Staining {
+  HE
+  ZN
+}
+
+/// Level count per HPF (High Power Field) untuk validasi struktur sel — mengikuti standar grading patologi 0/1+/2+/3+.
+enum HpfCountLevel {
+  TIDAK_ADA
+  JARANG
+  CUKUP_BANYAK
+  SANGAT_BANYAK
+}
+
+/// Demografi — hindari string bebas untuk laporan & integrasi antar sistem.
+enum Sex {
+  LAKI_LAKI
+  PEREMPUAN
+  LAINNYA
+}
+
+// -----------------------------------------------------------------------------
+// MODEL
+// -----------------------------------------------------------------------------
+
+/// USERS: autentikasi + profil tenaga kesehatan (SIP, institusi).
+/// Rekomendasi aplikasi: jangan hapus user dengan jejak klinis — nonaktifkan.
+model User {
+  id             String  @id @default(uuid())
+  name           String
+  email          String  @unique
+  password_hash  String
+  role           Role
+  is_first_login Boolean @default(true)
+  is_active      Boolean @default(true)
+  sip_number     String?
+  institution    String?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  patients_created Patient[]
+  cases_created    Case[]
+  images_uploaded  Image[]
+  comments_made    Comment[]
+  validations_made Validation[]
+  consensus_made   Consensus[]
+  reports_made     Report[]
+  audit_logs       AuditLog[]
+
+  @@index([role])
+  @@index([is_active])
+  @@map("users")
+}
+
+/// PATIENTS: demografi pasien. NIK/BPJS unik untuk deduplikasi regional.
+/// Alamat disimpan sebagai Text untuk alamat panjang; pertimbangkan normalisasi
+/// wilayah (kode wilayah Kemendagri) jika integrasi SATUSEHAT/bridging.
+model Patient {
+  id          String  @id @default(uuid())
+  name        String
+  /// Nomor Induk Kependudukan — nama kolom DB tetap `no_induk` (kompatibilitas migrasi).
+  no_induk    String  @unique @map("no_induk")
+  bpjs_number String? @unique
+  sex         Sex
+  /// Umur dalam tahun pada saat pendaftaran (pertimbangkan date_of_birth + computed jika perlu akurasi legal).
+  age         Int
+
+  created_by String
+  user       User     @relation(fields: [created_by], references: [id], onDelete: Restrict)
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
+
+  cases Case[]
+
+  @@index([created_by])
+  @@index([name])
+  @@map("patients")
+}
+
+/// CASES: satu episode pemeriksaan untuk satu pasien (boleh banyak citra).
+model Case {
+  id         String     @id @default(uuid())
+  patient_id String
+  patient    Patient    @relation(fields: [patient_id], references: [id], onDelete: Restrict)
+  created_by String
+  user       User       @relation(fields: [created_by], references: [id], onDelete: Restrict)
+  status     CaseStatus @default(PENDING_UPLOAD)
+  notes      String?    @db.Text
+
+  created_at   DateTime  @default(now())
+  completed_at DateTime?
+
+  images    Image[]
+  consensus Consensus?
+  reports   Report[]
+
+  @@index([patient_id])
+  @@index([created_by])
+  @@index([status])
+  @@index([created_at])
+  @@index([patient_id, status])
+  @@map("cases")
+}
+
+/// IMAGES: metadata file citra; file biner di object storage, path disimpan di sini.
+model Image {
+  id                String           @id @default(uuid())
+  case_id           String
+  case              Case             @relation(fields: [case_id], references: [id], onDelete: Cascade)
+  uploaded_by       String
+  user              User             @relation(fields: [uploaded_by], references: [id], onDelete: Restrict)
+  file_path         String
+  original_filename String
+  mime_type         String
+  file_size_bytes   Int
+  qc_status         QcStatus         @default(PENDING)
+  qc_failure_reason QcFailureReason?
+  qc_blur_score     Float?
+  qc_exposure_score Float?
+  magnification     Magnification
+  staining          Staining         @default(HE)
+  uploaded_at       DateTime         @default(now())
+  checked_at        DateTime?
+
+  ai_result  AiResult?
+  comments   Comment[]
+  validation Validation?
+
+  @@index([case_id])
+  @@index([uploaded_by])
+  @@index([qc_status])
+  @@index([uploaded_at])
+  @@index([case_id, qc_status])
+  @@map("images")
+}
+
+/// AI_RESULTS: agregat inferensi per citra (1:1 dengan Image). Denormalisasi ringkasan
+/// disengaja untuk dashboard cepat; detail per-objek ada di AiFinding.
+model AiResult {
+  id       String @id @default(uuid())
+  image_id String @unique
+  image    Image  @relation(fields: [image_id], references: [id], onDelete: Cascade)
+
+  total_necrosis_percent  Float         @default(0)
+  global_severity         SeverityLevel @default(SANGAT_RENDAH) /// sangat rendah, rendah, sedang, tinggi, sangat tinggi
+  total_granuloma_percent Float         @default(0)
+  total_datia_count       Int           @default(0)
+  total_epiteloid_count   Int           @default(0)
+  mean_confidence         Float?
+
+  is_uncertain      Boolean          @default(false)
+  processing_status ProcessingStatus @default(QUEUED)
+  processed_at      DateTime?
+
+  findings AiFinding[]
+
+  @@index([processing_status])
+  @@index([global_severity])
+  @@map("ai_results")
+}
+
+/// AI_FINDINGS: deteksi per struktur (bounding box / mask). JSONB untuk query & indeks GIN.
+model AiFinding {
+  id               String      @id @default(uuid())
+  ai_result_id     String
+  ai_result        AiResult    @relation(fields: [ai_result_id], references: [id], onDelete: Cascade)
+  finding_type     FindingType /// nekrosis granuloma, sel datia langhans, sel epiteloid
+  confidence_score Float
+
+  area_percent Float? /// persen area yang terdeteksi
+  count        Int? /// jumlah yang terdeteksi
+
+  /// Geometri deteksi: polygon / bbox — gunakan JsonB di PostgreSQL untuk indexing opsional.
+  segmentation_mask Json @db.JsonB
+
+  @@index([ai_result_id])
+  @@index([finding_type])
+  @@index([segmentation_mask(ops: JsonbPathOps)], type: Gin)
+  @@map("ai_findings")
+}
+
+/// COMMENTS: diskusi terbuka antar patolog pada tingkat citra. Validasi terstruktur ada di model Validation.
+model Comment {
+  id             String   @id @default(uuid())
+  image_id       String
+  image          Image    @relation(fields: [image_id], references: [id], onDelete: Cascade)
+  commentator_id String
+  user           User     @relation(fields: [commentator_id], references: [id], onDelete: Restrict)
+  content        String   @db.Text
+  is_deleted     Boolean  @default(false)
+  submitted_at   DateTime @default(now())
+
+  @@index([image_id])
+  @@index([commentator_id])
+  @@index([submitted_at])
+  @@map("comments")
+}
+
+/// VALIDATION: hasil validasi patolog per citra. 1:1 dengan Image — hanya 1 validasi final per citra.
+/// Patolog memvalidasi prediksi AI menggunakan label kategorikal (bukan angka eksak):
+/// - Persentase area (necrosis, granuloma) → SeverityLevel
+/// - Count cell (datia langhans, epithelioid) → HpfCountLevel (standar grading per HPF)
+/// Error AI untuk training masa depan dihitung implisit via JOIN dengan AiResult.
+model Validation {
+  id           String @id @default(uuid())
+  image_id     String @unique
+  image        Image  @relation(fields: [image_id], references: [id], onDelete: Cascade)
+  validator_id String
+  validator    User   @relation(fields: [validator_id], references: [id], onDelete: Restrict)
+
+  /// Severity klinis global hasil validasi patolog.
+  global_severity         SeverityLevel
+  /// Tingkat persentase necrosis hasil validasi patolog.
+  necrosis_severity       SeverityLevel @default(SANGAT_RENDAH)
+  /// Tingkat persentase granuloma hasil validasi patolog.
+  granuloma_severity      SeverityLevel @default(SANGAT_RENDAH)
+  /// Tingkat kehadiran datia langhans per HPF.
+  datia_count_level       HpfCountLevel @default(TIDAK_ADA)
+  /// Tingkat kehadiran epithelioid cell per HPF.
+  epithelioid_count_level HpfCountLevel @default(TIDAK_ADA)
+
+  /// Catatan patolog: free-text, juga tempat catat error AI yang signifikan untuk training development.
+  validation_comment String? @db.Text
+
+  submitted_at DateTime @default(now())
+
+  @@index([validator_id])
+  @@index([submitted_at])
+  @@map("validations")
+}
+
+/// CONSENSUS: satu ringkasan akhir per kasus. Dapat diubah oleh patolog mana pun dalam institusi yang sama.
+model Consensus {
+  id             String        @id @default(uuid())
+  case_id        String        @unique
+  case           Case          @relation(fields: [case_id], references: [id], onDelete: Cascade)
+  commentator_id String
+  user           User          @relation(fields: [commentator_id], references: [id], onDelete: Restrict)
+  severity       SeverityLevel
+  comment        String?       @db.Text
+  submitted_at   DateTime      @default(now())
+
+  @@index([commentator_id])
+  @@index([submitted_at])
+  @@map("consensus")
+}
+
+/// REPORTS: dokumen akhir; tanda tangan digital — simpan hash atau referensi ke HSM sesuai kebijakan RS.
+model Report {
+  id                String        @id @default(uuid())
+  case_id           String
+  case              Case          @relation(fields: [case_id], references: [id], onDelete: Restrict)
+  generated_by      String
+  user              User          @relation(fields: [generated_by], references: [id], onDelete: Restrict)
+  file_path         String
+  severity          SeverityLevel
+  pathologist_notes String?       @db.Text
+  diagnosis_summary String?       @db.Text
+  is_signed         Boolean       @default(false)
+  digital_signature String?
+  generated_at      DateTime      @default(now())
+  signed_at         DateTime?
+
+  @@index([case_id])
+  @@index([generated_by])
+  @@index([is_signed])
+  @@map("reports")
+}
+
+/// AUDIT_LOGS: append-only; payload JSONB untuk diff ringkas. Pertimbangkan partisi per bulan pada skala besar.
+model AuditLog {
+  id          String   @id @default(uuid())
+  user_id     String
+  user        User     @relation(fields: [user_id], references: [id], onDelete: Restrict)
+  action      String
+  entity_type String
+  entity_id   String
+  payload     Json?    @db.JsonB
+  created_at  DateTime @default(now())
+
+  @@index([user_id])
+  @@index([entity_type, entity_id])
+  @@index([created_at])
+  @@index([user_id, created_at])
+  @@index([payload(ops: JsonbPathOps)], type: Gin)
+  @@map("audit_logs")
+}
