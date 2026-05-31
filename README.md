@@ -42,11 +42,11 @@ Karena sensitivitas data, sistem dirancang dengan **keamanan sebagai prioritas u
 
 ## Anggota Kelompok
 
-| Nama | NIM | Peran |
-|---|---|---|
-| Walid Nadirul Ahnaf | G6401231109 |
-| Yasir | G6401231091 | |
-| | | |
+| Nama | NIM | 
+|---|---|
+| Walid Nadirul Ahnaf | G6401231109 | 
+| Yasir | G6401231091 | 
+| Cokorda Satria | G6401231064| 
 
 ---
 
