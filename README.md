@@ -44,8 +44,8 @@ Karena sensitivitas data, sistem dirancang dengan **keamanan sebagai prioritas u
 
 | Nama | NIM | Peran |
 |---|---|---|
-| *(isi nama anggota)* | *(isi NIM)* | *(isi peran)* |
-| | | |
+| Walid Nadirul Ahnaf | G6401231109 |
+| Yasir | G6401231091 | |
 | | | |
 
 ---
