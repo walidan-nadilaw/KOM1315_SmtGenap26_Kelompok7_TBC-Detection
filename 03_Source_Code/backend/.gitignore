@@ -10,10 +10,8 @@ src/**/*.js
 src/**/*.js.map
 src/**/*.d.ts
 src/**/*.d.ts.map
+!src/types/*.d.ts
 # Prisma generated files
 /src/generated/prisma
-# AI assistant tools — jangan di-commit
 .claude/
-CLAUDE.md
-# Editor settings lokal
 .vscode/*

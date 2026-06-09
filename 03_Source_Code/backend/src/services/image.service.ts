@@ -2,12 +2,8 @@ import { Role } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { AppError } from "../errors/app.error.js";
 import { assertSameInstitution } from "../utils/access.utils.js";
-import {
-  buildFilePath,
-  createPresignedUploadUrl,
-  createSignedViewUrl,
-  deleteFile,
-} from "../utils/supabase-storage.utils.js";
+import { writeAuditLog } from "../utils/audit.utils.js";
+import { storage } from "./storage/index.js";
 import { type RequestPresignedUrlsInput, type ConfirmUploadInput } from "../validations/image.validation.js";
 
 const STALE_PENDING_TTL_MS = 2 * 60 * 60 * 1000; // 2 jam
@@ -24,7 +20,7 @@ const cleanupStalePendingImages = async (caseId: string) => {
 
   if (staleImages.length === 0) return;
 
-  await Promise.allSettled(staleImages.map((img) => deleteFile(img.file_path)));
+  await Promise.allSettled(staleImages.map((img) => storage.deleteFile(img.file_path)));
   await prisma.image.deleteMany({
     where: { id: { in: staleImages.map((img) => img.id) } },
   });
@@ -47,7 +43,7 @@ export const requestPresignedUrls = async (
   const results = await Promise.all(
     images.map(async (item) => {
       const imageId = crypto.randomUUID();
-      const filePath = buildFilePath(caseId, imageId, item.original_filename);
+      const filePath = storage.buildFilePath(caseId, imageId, item.original_filename);
 
       const [image, presignedUrl] = await Promise.all([
         prisma.image.create({
@@ -63,7 +59,7 @@ export const requestPresignedUrls = async (
             staining: item.staining,
           },
         }),
-        createPresignedUploadUrl(filePath),
+        storage.createPresignedUploadUrl(filePath),
       ]);
 
       return { image_id: image.id, presigned_url: presignedUrl, file_path: filePath };
@@ -97,10 +93,15 @@ export const confirmUpload = async (caseId: string, operatorId: string, data: Co
     data: { qc_status: "PASSED", checked_at: new Date() },
   });
 
-  return prisma.image.findMany({
+  const confirmed = await prisma.image.findMany({
     where: { id: { in: data.image_ids } },
     orderBy: { uploaded_at: "asc" },
   });
+
+  await writeAuditLog(operatorId, "CONFIRM_IMAGES", "Image", caseId, {
+    image_ids: pendingIds,
+  });
+  return confirmed;
 };
 
 export const listImagesForCase = async (
@@ -131,7 +132,7 @@ export const listImagesForCase = async (
       magnification: image.magnification,
       qc_status: image.qc_status,
       qc_failure_reason: image.qc_failure_reason,
-      view_url: image.file_path ? await createSignedViewUrl(image.file_path) : null,
+      view_url: image.file_path ? await storage.createSignedViewUrl(image.file_path) : null,
     }))
   );
 };
@@ -144,8 +145,9 @@ export const deleteImage = async (imageId: string, operatorId: string) => {
   if (!image) throw new AppError("Gambar tidak ditemukan", 404);
   await assertSameInstitution(operatorId, image.case.created_by);
 
-  await deleteFile(image.file_path);
+  await storage.deleteFile(image.file_path);
   await prisma.image.delete({ where: { id: imageId } });
+  await writeAuditLog(operatorId, "DELETE_IMAGE", "Image", imageId);
 };
 
 export const submitCase = async (caseId: string, operatorId: string) => {
@@ -168,8 +170,11 @@ export const submitCase = async (caseId: string, operatorId: string) => {
     throw new AppError("Semua gambar harus lulus QC sebelum submit", 400);
   }
 
-  return prisma.case.update({
+  const updated = await prisma.case.update({
     where: { id: caseId },
     data: { status: "PENDING_VALIDATION" },
   });
+
+  await writeAuditLog(operatorId, "SUBMIT_CASE", "Case", caseId);
+  return updated;
 };
