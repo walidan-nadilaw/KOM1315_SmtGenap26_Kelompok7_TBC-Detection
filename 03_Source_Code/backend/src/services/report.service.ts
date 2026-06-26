@@ -3,7 +3,6 @@ import { prisma } from "../config/prisma.js";
 import { AppError } from "../errors/app.error.js";
 import { assertSameInstitution } from "../utils/access.utils.js";
 import { writeAuditLog } from "../utils/audit.utils.js";
-import { signContent } from "../utils/signature.utils.js";
 import { decryptField } from "../utils/crypto.utils.js";
 import { storage } from "./storage/index.js";
 import { type GenerateReportInput } from "../validations/report.validation.js";
@@ -179,20 +178,13 @@ export const finalizeReport = async (reportId: string, patologId: string) => {
 
   const signedAt = new Date();
 
-  // Hash konten laporan untuk tamper-evidence (SHA-256)
+  // Hash konten laporan untuk tamper-evidence
   const snapshotBytes = await storage.downloadFile(report.file_path);
   const contentHash = crypto.createHash("sha256").update(snapshotBytes).digest("hex");
 
-  // Buat payload yang akan ditandatangani:
-  // format: "<contentHash>|<reportId>|<signerUserId>|<timestamp>"
-  // Mengikat integritas konten + identitas penandatangan + waktu + ID laporan
-  const signaturePayload = [contentHash, report.id, patologId, signedAt.toISOString()].join("|");
-
-  // Tanda tangani dengan RSA-2048 private key
-  // Menghasilkan Base64 string (~344 chars) yang dapat diverifikasi
-  // oleh siapapun yang memiliki public key — berbeda dengan SHA-256 hash
-  // yang tidak membuktikan identitas penandatangan (non-repudiation).
-  const digitalSignature = signContent(signaturePayload);
+  // Ikat hash konten + identitas penandatangan + waktu + ID laporan
+  const signatureInput = [contentHash, report.id, patologId, signedAt.toISOString()].join("|");
+  const digitalSignature = crypto.createHash("sha256").update(signatureInput).digest("hex");
 
   const signed = await prisma.report.update({
     where: { id: reportId },
