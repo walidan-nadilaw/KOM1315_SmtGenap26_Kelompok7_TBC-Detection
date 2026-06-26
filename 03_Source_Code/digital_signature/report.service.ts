@@ -3,8 +3,9 @@ import { prisma } from "../config/prisma.js";
 import { AppError } from "../errors/app.error.js";
 import { assertSameInstitution } from "../utils/access.utils.js";
 import { writeAuditLog } from "../utils/audit.utils.js";
+import { decryptField } from "../utils/crypto.utils.js";
 import { storage } from "./storage/index.js";
-import { type GenerateReportInput } from "../validations/report.validation.js"; 
+import { type GenerateReportInput } from "../validations/report.validation.js";
 
 const buildReportFilePath = (caseId: string, reportId: string) =>
   `cases/${caseId}/reports/${reportId}.json`;
@@ -54,7 +55,8 @@ export const generateReport = async (
     generated_at: new Date().toISOString(),
     patient: {
       name: kasus.patient.name,
-      no_induk: kasus.patient.no_induk,
+      // Dekripsi no_induk agar snapshot laporan terbaca manusia (bukan ciphertext)
+      no_induk: decryptField(kasus.patient.no_induk),
       sex: kasus.patient.sex,
       age: kasus.patient.age,
     },
